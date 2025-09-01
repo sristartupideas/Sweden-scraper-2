@@ -22,7 +22,7 @@ ROBOTSTXT_OBEY = False
 # Configure a delay for requests for the same website (default: 0)
 # See https://docs.scrapy.org/en/latest/topics/settings.html#download-delay
 # See also autothrottle settings and docs
-DOWNLOAD_DELAY = 2
+DOWNLOAD_DELAY = 1  # Reduced for cloud environments
 # The download delay setting will honor only one of:
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
 CONCURRENT_REQUESTS_PER_IP = 1
@@ -91,3 +91,22 @@ AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
 REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"
 #TWISTED_REACTOR = "twisted.internet.asyncio.AsyncioSelectorReactor"
 FEED_EXPORT_ENCODING = "utf-8"
+
+# Cloud-optimized settings for Render/Heroku
+# Disable features that don't work well in cloud environments
+TELNETCONSOLE_ENABLED = False
+LOG_LEVEL = 'INFO'
+
+# Optimize for cloud memory constraints
+MEMUSAGE_ENABLED = True
+MEMUSAGE_LIMIT_MB = 512
+
+# Ensure proper output handling in cloud environments
+FEEDS = {
+    'bolagsplatsen_listings.json': {
+        'format': 'json',
+        'encoding': 'utf8',
+        'indent': 2,
+        'overwrite': True,
+    }
+}
