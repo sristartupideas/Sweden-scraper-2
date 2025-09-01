@@ -7,3 +7,4 @@ pydantic==2.8.2
 aiofiles==24.1.0
 requests==2.32.3
 lxml==5.2.2
+pathlib2==2.3.7
