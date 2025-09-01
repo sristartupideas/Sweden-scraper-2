@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import json
 import os
 import re
+import sys
 from datetime import datetime
 import subprocess
 
@@ -18,33 +19,37 @@ TRANSLATIONS = {
     # Industries
     "handel": "trade", "tillverkning": "manufacturing", "tjänster": "services",
     "hotell": "hotel", "restaurang": "restaurant", "e-handel": "e-commerce",
-    "bygg": "construction", "transport": "transport", "hälsa": "health",
-    "utbildning": "education", "finans": "finance", "fastighet": "real estate",
+    "bygg": "construction", "transport": "transport", "logistik": "logistics",
+    "fastighet": "real estate", "fastigheter": "real estate",
     
-    # Locations
-    "stockholm": "Stockholm", "göteborg": "Gothenburg", "malmö": "Malmö",
-    "uppsala": "Uppsala", "västerås": "Västerås", "örebro": "Örebro",
+    # Financial terms
+    "miljoner": "million", "mkr": "million SEK", "tkr": "thousand SEK",
+    "miljarder": "billion", "bkr": "billion SEK",
     
-    # Status
-    "lönsamt": "profitable", "olönsamt": "unprofitable", "nytt": "new",
-    "etablerat": "established", "växande": "growing", "stabil": "stable",
+    # Business status
+    "lönsam": "profitable", "väletablerad": "well-established",
+    "etablerad": "established", "populär": "popular", "stark": "strong",
+    "tillväxt": "growth", "potential": "potential", "framtid": "future",
     
-    # Common words
-    "till": "for", "salu": "sale", "köp": "buy", "sälj": "sell",
-    "bra": "good", "mycket": "very", "stor": "large", "liten": "small"
+    # Location terms
+    "sverige": "Sweden", "stockholm": "Stockholm", "göteborg": "Gothenburg",
+    "malmö": "Malmö", "uppsala": "Uppsala", "västerås": "Västerås",
+    
+    # Business activities
+    "leverantör": "supplier", "grossist": "wholesaler", "butik": "store",
+    "fabrik": "factory", "kontor": "office", "lager": "warehouse",
+    "verkstad": "workshop", "ateljé": "studio", "salong": "salon"
 }
 
-# Currency conversion rate
+# Currency conversion rate (approximate)
 SEK_TO_USD = 0.095  # 1 SEK = 0.095 USD
 
 def translate_text(text):
-    """Translate Swedish text to English"""
+    """Translate Swedish text to English using the translation dictionary"""
     if not text:
         return text
     
-    translated = text.lower()
-    
-    # Replace Swedish words with English
+    translated = text
     for swedish, english in TRANSLATIONS.items():
         translated = translated.replace(swedish, english)
     
@@ -99,152 +104,166 @@ class BusinessListing(BaseModel):
 def run_scraper():
     """Run the Scrapy spider and return the data"""
     try:
-        # Run the scraper with cloud-optimized settings
-        cmd = [sys.executable, "start_scraper.py"] if os.path.exists("start_scraper.py") else ["scrapy", "crawl", "bolagsplatsen"]
+        # First, try to load existing data from multiple possible locations
+        data_files = [
+            "bolagsplatsen_listings.json",
+            "final_enhanced_listings.json",
+            "enhanced_listings.json"
+        ]
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=os.getcwd()  # Use current working directory instead of hardcoded path
-        )
+        raw_data = None
         
-        if result.returncode == 0:
-            # Load the scraped data
-            if os.path.exists("bolagsplatsen_listings.json"):
-                with open("bolagsplatsen_listings.json", "r", encoding="utf-8") as f:
-                    raw_data = json.load(f)
-                
-                # Transform the data to match the expected format with translation and USD conversion
-                transformed_data = []
-                for item in raw_data:
-                    # Create details sections from the scraped data
-                    details_sections = []
-                    
-                    # Add business description section (use full description if available)
-                    description_text = item.get('full_description') or item.get('description', '')
-                    if description_text:
-                        details_sections.append({
-                            "infoSummary": "Business Description",
-                            "infoItems": [translate_text(description_text)]
-                        })
-                    
-                    # Add structured content sections if available
-                    if item.get('structured_content'):
-                        structured_content = item.get('structured_content', {})
-                        for section_key, section_content in structured_content.items():
-                            if section_content and len(section_content.strip()) > 20:
-                                # Translate section names
-                                section_names = {
-                                    'company_brief': 'Company Overview',
-                                    'potential': 'Growth Potential',
-                                    'reason_for_sale': 'Reason for Sale',
-                                    'price_idea': 'Pricing Details',
-                                    'summary': 'Summary',
-                                    'description': 'Description',
-                                    'business_activity': 'Business Activity',
-                                    'market': 'Market Information',
-                                    'competition': 'Competitive Situation'
-                                }
-                                
-                                section_title = section_names.get(section_key, section_key.replace('_', ' ').title())
-                                details_sections.append({
-                                    "infoSummary": section_title,
-                                    "infoItems": [translate_text(section_content)]
-                                })
-                    
-                    # Add financial metrics section
-                    financial_items = []
-                    if item.get('revenue'):
-                        financial_items.append(f"Revenue: {translate_text(item.get('revenue', ''))}")
-                    if item.get('detailed_revenue'):
-                        financial_items.append(f"Detailed Revenue: {translate_text(item.get('detailed_revenue', ''))}")
-                    if item.get('profit_status'):
-                        financial_items.append(f"Profit Status: {translate_text(item.get('profit_status', ''))}")
-                    if item.get('detailed_profit'):
-                        financial_items.append(f"Detailed Profit: {translate_text(item.get('detailed_profit', ''))}")
-                    if item.get('price'):
-                        financial_items.append(f"Asking Price: {convert_currency(item.get('price', ''))}")
-                    
-                    # Add additional financial details
-                    if item.get('financial_details'):
-                        for detail in item.get('financial_details', []):
-                            financial_items.append(translate_text(detail))
-                    
-                    if financial_items:
-                        details_sections.append({
-                            "infoSummary": "Financial Information",
-                            "infoItems": financial_items
-                        })
-                    
-                    # Add business metrics section
-                    business_items = []
-                    if item.get('employee_count'):
-                        business_items.append(f"Employees: {translate_text(item.get('employee_count', ''))}")
-                    
-                    if business_items:
-                        details_sections.append({
-                            "infoSummary": "Business Metrics",
-                            "infoItems": business_items
-                        })
-                    
-                    # Add contact information section
-                    contact_items = []
-                    if item.get('phone'):
-                        contact_items.append(f"Phone: {item.get('phone', '')}")
-                    if item.get('email'):
-                        contact_items.append(f"Email: {item.get('email', '')}")
-                    if item.get('broker_name'):
-                        contact_items.append(f"Broker: {translate_text(item.get('broker_name', ''))}")
-                    if item.get('broker_company'):
-                        contact_items.append(f"Broker Company: {translate_text(item.get('broker_company', ''))}")
-                    
-                    if contact_items:
-                        details_sections.append({
-                            "infoSummary": "Contact Information",
-                            "infoItems": contact_items
-                        })
-                    
-                    # Transform the item to match expected format with translation and USD conversion
-                    transformed_item = {
-                        "title": translate_text(item.get('title', '')),
-                        "company": translate_text(item.get('broker_company', item.get('broker_name', ''))),
-                        "location": translate_text(item.get('location', '')),
-                        "price": convert_currency(item.get('price', '')),
-                        "category": translate_text(item.get('category', '')),
-                        "industry": translate_text(item.get('category', '')),  # Using category as industry
-                        "link": item.get('url', ''),
-                        "details": details_sections,
-                        "business_name": translate_text(item.get('title', '')),
-                        "contact_name": translate_text(item.get('broker_name', '')),
-                        "phone_number": item.get('phone', 'Contact via website')
-                    }
-                    
-                    transformed_data.append(transformed_item)
-                
-                # Remove duplicates based on title and link
-                seen_titles = set()
-                seen_links = set()
-                unique_data = []
-                
-                for item in transformed_data:
-                    title = item.get('title', '')
-                    link = item.get('link', '')
-                    
-                    # Check if we've seen this title or link before
-                    if title not in seen_titles and link not in seen_links:
-                        seen_titles.add(title)
-                        seen_links.add(link)
-                        unique_data.append(item)
-                
-                return unique_data
-            else:
-                return []
-        else:
-            return []
+        # Try to load from existing files
+        for file_path in data_files:
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        raw_data = json.load(f)
+                        print(f"Loaded data from {file_path}: {len(raw_data)} items")
+                        break
+                except Exception as e:
+                    print(f"Error loading {file_path}: {e}")
+                    continue
+        
+        # If no data files found, try to run the scraper
+        if not raw_data:
+            print("No existing data found, running scraper...")
+            # Run the scraper with cloud-optimized settings
+            cmd = [sys.executable, "start_scraper.py"] if os.path.exists("start_scraper.py") else ["scrapy", "crawl", "bolagsplatsen"]
             
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=os.getcwd()  # Use current working directory instead of hardcoded path
+            )
+            
+            if result.returncode == 0:
+                # Check if the scraper created a new file
+                for file_path in data_files:
+                    if os.path.exists(file_path):
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            raw_data = json.load(f)
+                            break
+            else:
+                print(f"Scraper failed: {result.stderr}")
+                return None
+        
+        if not raw_data:
+            return None
+        
+        # Transform the data to match the expected format with translation and USD conversion
+        transformed_data = []
+        for item in raw_data:
+            # Create details sections from the scraped data
+            details_sections = []
+            
+            # Add business description section (use full description if available)
+            description_text = item.get('full_description') or item.get('description', '')
+            if description_text:
+                details_sections.append({
+                    "infoSummary": "Business Description",
+                    "infoItems": [translate_text(description_text)]
+                })
+            
+            # Add structured content sections if available
+            if item.get('structured_content'):
+                structured_content = item.get('structured_content', {})
+                for section_key, section_content in structured_content.items():
+                    if section_content and len(str(section_content).strip()) > 20:
+                        # Translate section names
+                        section_names = {
+                            'company_brief': 'Company Overview',
+                            'potential': 'Growth Potential',
+                            'reason_for_sale': 'Reason for Sale',
+                            'price_idea': 'Pricing Details',
+                            'summary': 'Summary',
+                            'description': 'Description',
+                            'business_activity': 'Business Activity',
+                            'market': 'Market Information',
+                            'competition': 'Competitive Situation'
+                        }
+                        
+                        section_title = section_names.get(section_key, section_key.replace('_', ' ').title())
+                        details_sections.append({
+                            "infoSummary": section_title,
+                            "infoItems": [translate_text(str(section_content))]
+                        })
+            
+            # Add financial metrics section
+            financial_items = []
+            if item.get('revenue'):
+                financial_items.append(f"Revenue: {translate_text(item.get('revenue', ''))}")
+            if item.get('detailed_revenue'):
+                financial_items.append(f"Detailed Revenue: {translate_text(item.get('detailed_revenue', ''))}")
+            if item.get('profit_status'):
+                financial_items.append(f"Profit Status: {translate_text(item.get('profit_status', ''))}")
+            if item.get('detailed_profit'):
+                financial_items.append(f"Detailed Profit: {translate_text(item.get('detailed_profit', ''))}")
+            if item.get('price'):
+                financial_items.append(f"Asking Price: {convert_currency(item.get('price', ''))}")
+            
+            # Add additional financial details
+            if item.get('financial_details'):
+                for detail in item.get('financial_details', []):
+                    financial_items.append(translate_text(detail))
+            
+            if financial_items:
+                details_sections.append({
+                    "infoSummary": "Financial Information",
+                    "infoItems": financial_items
+                })
+            
+            # Add business metrics section
+            business_items = []
+            if item.get('employee_count'):
+                business_items.append(f"Employees: {translate_text(item.get('employee_count', ''))}")
+            
+            if business_items:
+                details_sections.append({
+                    "infoSummary": "Business Metrics",
+                    "infoItems": business_items
+                })
+            
+            # Add contact information section
+            contact_items = []
+            if item.get('phone'):
+                contact_items.append(f"Phone: {item.get('phone', '')}")
+            if item.get('email'):
+                contact_items.append(f"Email: {item.get('email', '')}")
+            if item.get('broker_name'):
+                contact_items.append(f"Broker: {translate_text(item.get('broker_name', ''))}")
+            if item.get('broker_company'):
+                contact_items.append(f"Broker Company: {translate_text(item.get('broker_company', ''))}")
+            
+            if contact_items:
+                details_sections.append({
+                    "infoSummary": "Contact Information",
+                    "infoItems": contact_items
+                })
+            
+            # Create the transformed item
+            transformed_item = {
+                "title": item.get("title", ""),
+                "company": item.get("title", ""),  # Use title as company name
+                "location": item.get("location", ""),
+                "price": convert_currency(item.get("price", "")),
+                "category": item.get("category", ""),
+                "industry": item.get("category", ""),  # Use category as industry
+                "link": item.get("url", ""),
+                "details": details_sections,
+                "business_name": item.get("title", ""),
+                "contact_name": item.get("broker_name", ""),
+                "phone_number": item.get("phone", "")
+            }
+            
+            transformed_data.append(transformed_item)
+        
+        return transformed_data
+        
     except Exception as e:
-        return []
+        print(f"Error in run_scraper: {e}")
+        return None
 
 @app.get("/")
 async def root():
