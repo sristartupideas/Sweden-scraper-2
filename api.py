@@ -99,12 +99,14 @@ class BusinessListing(BaseModel):
 def run_scraper():
     """Run the Scrapy spider and return the data"""
     try:
-        # Run the scraper
+        # Run the scraper with cloud-optimized settings
+        cmd = [sys.executable, "start_scraper.py"] if os.path.exists("start_scraper.py") else ["scrapy", "crawl", "bolagsplatsen"]
+        
         result = subprocess.run(
-            ["scrapy", "crawl", "bolagsplatsen"],
+            cmd,
             capture_output=True,
             text=True,
-            cwd="/Users/sridharp/Downloads/scrapper"
+            cwd=os.getcwd()  # Use current working directory instead of hardcoded path
         )
         
         if result.returncode == 0:
