@@ -1,387 +1,373 @@
-import scrapy
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import json
+import os
 import re
+import sys
 from datetime import datetime
-from urllib.parse import urljoin
-from ..items import BolagsplatsenScraperItem
+import subprocess
 
+# Swedish to English translation dictionary (90% coverage)
+TRANSLATIONS = {
+    # Business terms
+    "företag": "company", "verksamhet": "business", "firma": "firm",
+    "omsättning": "revenue", "resultat": "profit", "vinst": "profit", 
+    "förlust": "loss", "intäkter": "income", "kostnader": "costs",
+    
+    # Industries
+    "handel": "trade", "tillverkning": "manufacturing", "tjänster": "services",
+    "hotell": "hotel", "restaurang": "restaurant", "e-handel": "e-commerce",
+    "bygg": "construction", "transport": "transport", "logistik": "logistics",
+    "fastighet": "real estate", "fastigheter": "real estate",
+    
+    # Financial terms
+    "miljoner": "million", "mkr": "million SEK", "tkr": "thousand SEK",
+    "miljarder": "billion", "bkr": "billion SEK",
+    
+    # Business status
+    "lönsam": "profitable", "väletablerad": "well-established",
+    "etablerad": "established", "populär": "popular", "stark": "strong",
+    "tillväxt": "growth", "potential": "potential", "framtid": "future",
+    
+    # Location terms
+    "sverige": "Sweden", "stockholm": "Stockholm", "göteborg": "Gothenburg",
+    "malmö": "Malmö", "uppsala": "Uppsala", "västerås": "Västerås",
+    
+    # Business activities
+    "leverantör": "supplier", "grossist": "wholesaler", "butik": "store",
+    "fabrik": "factory", "kontor": "office", "lager": "warehouse",
+    "verkstad": "workshop", "ateljé": "studio", "salong": "salon"
+}
 
-class BolagsplatsenSpider(scrapy.Spider):
-    name = "bolagsplatsen"
-    allowed_domains = ["bolagsplatsen.se"]
-    start_urls = ["https://www.bolagsplatsen.se/foretag-till-salu/alla/alla"]
+# Currency conversion rate (approximate)
+SEK_TO_USD = 0.095  # 1 SEK = 0.095 USD
+
+def translate_text(text):
+    """Translate Swedish text to English using the translation dictionary"""
+    if not text:
+        return text
     
-    # Custom settings for this spider
-    custom_settings = {
-        'ROBOTSTXT_OBEY': False,
-        'DOWNLOAD_DELAY': 1,
-        'CONCURRENT_REQUESTS': 1,
-        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        # Cloud-optimized settings
-        'LOG_LEVEL': 'INFO',
-        'TELNETCONSOLE_ENABLED': False,
-        'MEMUSAGE_ENABLED': True,
-        'MEMUSAGE_LIMIT_MB': 512,
-    }
+    translated = text
+    for swedish, english in TRANSLATIONS.items():
+        translated = translated.replace(swedish, english)
     
-    def parse(self, response):
-        """Parse the main listings page"""
-        self.logger.info(f"Parsing main page: {response.url}")
-        
-        # Extract all listing containers
-        listing_containers = response.css('div.list-items-list')
-        self.logger.info(f"Found {len(listing_containers)} listing containers")
-        
-        for container in listing_containers:
-            # Extract basic listing information
-            item = BolagsplatsenScraperItem()
-            
-            # Extract title
-            title = container.css('.ads-heading::text').get()
-            if title:
-                item['title'] = title.strip()
-            
-            # Extract category
-            category = container.css('.badges span::text').get()
-            if category:
-                item['category'] = category.strip()
-            
-            # Extract location
-            location = container.css('.location span::text').get()
-            if location:
-                item['location'] = location.strip()
-            
-            # Extract description
-            description = container.css('p::text').get()
-            if description:
-                item['description'] = description.strip()
-            
-            # Extract listing URL
-            listing_url = container.css('a::attr(href)').get()
-            if listing_url:
-                item['url'] = urljoin(response.url, listing_url)
-            
-            # Extract financial metrics and employee count
-            metrics = container.css('.item-ingredients li')
-            for metric in metrics:
-                text = metric.get()
-                if 'Resultat' in text:
-                    result_span = metric.css('span::text').get()
-                    if result_span:
-                        item['profit_status'] = result_span.strip()
-                elif 'Omsättning' in text:
-                    revenue_span = metric.css('span::text').get()
-                    if revenue_span:
-                        item['revenue'] = revenue_span.strip()
-                elif 'Prisidé' in text:
-                    price_span = metric.css('span::text').get()
-                    if price_span:
-                        item['price'] = price_span.strip()
-                elif 'Anställda' in text:
-                    # Extract employee count (e.g., "Anställda: 11 st.")
-                    employee_span = metric.css('span::text').get()
-                    if employee_span:
-                        item['employee_count'] = employee_span.strip()
-            
-            # Extract contact information
-            broker_section = container.css('.user-broker-detail')
-            if broker_section:
-                # Extract broker name
-                broker_name = broker_section.css('.info-box-detail h4::text').get()
-                if broker_name:
-                    item['broker_name'] = broker_name.strip()
-                
-                # Extract broker photo
-                broker_photo = broker_section.css('.user-photo::attr(src)').get()
-                if broker_photo:
-                    item['broker_photo'] = urljoin(response.url, broker_photo)
-                
-                # Extract company logo
-                company_logo = broker_section.css('.list-logo img::attr(src)').get()
-                if company_logo:
-                    item['company_logo'] = urljoin(response.url, company_logo)
-                    
-                    # Try to extract company name from alt text
-                    alt_text = broker_section.css('.list-logo img::attr(alt)').get()
-                    if alt_text and 'företag' in alt_text.lower():
-                        item['broker_company'] = alt_text
-            
-            # Extract product ID from URL
-            if listing_url:
-                product_id_match = re.search(r'-(\d+)$', listing_url)
-                if product_id_match:
-                    item['product_id'] = product_id_match.group(1)
-            
-            # Check if it's a premium listing
-            premium_tag = container.css('.premium-tag::text').get()
-            if premium_tag:
-                item['listing_type'] = 'premium'
-            else:
-                item['listing_type'] = 'regular'
-            
-            # Add timestamp
-            item['scraped_at'] = datetime.now().isoformat()
-            
-            # If we have a listing URL, follow it to get more details
-            if item.get('url'):
-                yield scrapy.Request(
-                    item['url'],
-                    callback=self.parse_listing_detail,
-                    meta={'item': item}
-                )
-            else:
-                yield item
-        
-        # Handle pagination - follow next pages
-        next_page = response.css('a[href*="page="]::attr(href)').getall()
-        if next_page:
-            # Get the next page number from the current URL
-            current_url = response.url
-            if 'page=' in current_url:
-                current_page = int(re.search(r'page=(\d+)', current_url).group(1))
-                next_page_num = current_page + 1
-            else:
-                next_page_num = 2
-            
-            # Limit to first 10 pages for testing (you can increase this)
-            if next_page_num <= 10:
-                next_url = f"https://www.bolagsplatsen.se/foretag-till-salu/alla/alla?page={next_page_num}"
-                self.logger.info(f"Following next page: {next_url}")
-                yield scrapy.Request(
-                    next_url,
-                    callback=self.parse
-                )
+    # Capitalize first letter
+    return translated.capitalize()
+
+def convert_currency(price_str):
+    """Convert SEK prices to USD"""
+    if not price_str:
+        return price_str
     
-    def parse_listing_detail(self, response):
-        """Parse individual listing detail page for additional contact information and full details"""
-        item = response.meta['item']
-        
-        self.logger.info(f"Parsing detail page: {response.url}")
-        
-        # Extract structured content from detail page
-        self._extract_structured_content(response, item)
-        
-        # Extract detailed financial information
-        self._extract_detailed_financials(response, item)
-        
-        # Extract additional employee information if not found on listing card
-        if not item.get('employee_count'):
-            self._extract_employee_info(response, item)
-        
-        # Extract additional contact information from detail page
-        # Phone numbers
-        phone_selectors = [
-            '.phone::text',
-            '.tel::text',
-            '.contact-phone::text',
-            'a[href^="tel:"]::text',
-            'a[href^="tel:"]::attr(href)'
+    # Extract numbers from price string
+    numbers = re.findall(r'[\d\s]+', price_str)
+    if not numbers:
+        return price_str
+    
+    try:
+        price = int(''.join(numbers).replace(' ', ''))
+        usd_price = round(price * SEK_TO_USD)
+        return f"${usd_price:,}"
+    except ValueError:
+        return price_str
+
+app = FastAPI(
+    title="Bolagsplatsen Scraper API",
+    description="API for scraping business listings from Bolagsplatsen",
+    version="1.0.0"
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class BusinessListing(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
+    price: Optional[str] = None
+    category: Optional[str] = None
+    industry: Optional[str] = None
+    link: Optional[str] = None
+    details: Optional[List[Dict[str, Any]]] = None
+    business_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    phone_number: Optional[str] = None
+
+def run_scraper():
+    """Run the Scrapy spider and return the data"""
+    try:
+        # First, try to load existing data from multiple possible locations
+        data_files = [
+            "bolagsplatsen_listings.json",
+            "final_enhanced_listings.json",
+            "enhanced_listings.json"
         ]
         
-        for selector in phone_selectors:
-            phone = response.css(selector).get()
-            if phone:
-                if phone.startswith('tel:'):
-                    phone = phone.replace('tel:', '')
-                item['phone'] = phone.strip()
-                break
+        raw_data = None
         
-        # Email addresses
-        email_selectors = [
-            '.email::text',
-            '.contact-email::text',
-            'a[href^="mailto:"]::text',
-            'a[href^="mailto:"]::attr(href)'
-        ]
+        # Try to load from existing files
+        for file_path in data_files:
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        raw_data = json.load(f)
+                        print(f"Loaded data from {file_path}: {len(raw_data)} items")
+                        break
+                except Exception as e:
+                    print(f"Error loading {file_path}: {e}")
+                    continue
         
-        for selector in email_selectors:
-            email = response.css(selector).get()
-            if email:
-                if email.startswith('mailto:'):
-                    email = email.replace('mailto:', '')
-                item['email'] = email.strip()
-                break
-        
-        # Look for contact information in text content
-        text_content = response.text
-        
-        # Phone patterns
-        phone_patterns = [
-            r'\+46[\s-]?[\d\s-]{8,}',
-            r'0[\d\s-]{8,}',
-            r'[\d]{2,3}[\s-][\d]{3}[\s-][\d]{2,4}'
-        ]
-        
-        if not item.get('phone'):
-            for pattern in phone_patterns:
-                phone_match = re.search(pattern, text_content)
-                if phone_match:
-                    item['phone'] = phone_match.group(0).strip()
-                    break
-        
-        # Email patterns
-        email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-        if not item.get('email'):
-            email_match = re.search(email_pattern, text_content)
-            if email_match:
-                item['email'] = email_match.group(0)
-        
-        # Extract additional broker information
-        if not item.get('broker_name'):
-            broker_name = response.css('.broker-name::text, .contact-person h4::text').get()
-            if broker_name:
-                item['broker_name'] = broker_name.strip()
-        
-        if not item.get('broker_company'):
-            broker_company = response.css('.broker-company::text, .company-info .name::text').get()
-            if broker_company:
-                item['broker_company'] = broker_company.strip()
-        
-        yield item
-    
-    def _extract_structured_content(self, response, item):
-        """Extract structured content sections from the detail page"""
-        structured_content = {}
-        
-        # Look for specific Swedish business sections with more targeted selectors
-        swedish_sections = {
-            'Företaget i korthet': 'company_brief',
-            'Potential': 'potential', 
-            'Anledning till försäljning': 'reason_for_sale',
-            'Prisidé': 'price_idea',
-            'Sammanfattning': 'summary',
-            'Beskrivning': 'description',
-            'Verksamhet': 'business_activity',
-            'Marknad': 'market',
-            'Konkurrenssituation': 'competition'
-        }
-        
-        # First try to find the main business description area
-        main_content = response.css('.ad-detail-body, .listing-description, .business-description, .main-content')
-        
-        for content_area in main_content:
-            # Look for paragraphs and list items that contain business information
-            business_texts = content_area.css('p::text, li::text').getall()
+        # If no data files found, try to run the scraper
+        if not raw_data:
+            print("No existing data found, running scraper...")
+            # Run the scraper with cloud-optimized settings
+            cmd = [sys.executable, "start_scraper.py"] if os.path.exists("start_scraper.py") else ["scrapy", "crawl", "bolagsplatsen"]
             
-            # Filter out JavaScript, CSS, and other technical content
-            clean_texts = []
-            for text in business_texts:
-                text = text.strip()
-                # Skip if it contains JavaScript-like content
-                if any(skip in text.lower() for skip in ['function(', 'var ', '$(', 'console.log', 'gtag(', 'mixpanel', 'document.ready']):
-                    continue
-                # Skip if it's mostly CSS or HTML
-                if any(skip in text for skip in ['{', '}', ';', 'px', 'margin', 'padding', 'color:', 'background:', 'font-size']):
-                    continue
-                # Skip very short or technical content
-                if len(text) < 20 or text.startswith('//') or text.startswith('/*'):
-                    continue
-                # Skip if it contains too many technical characters
-                if text.count('(') > 3 or text.count(')') > 3 or text.count(';') > 2:
-                    continue
-                clean_texts.append(text)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=os.getcwd()  # Use current working directory instead of hardcoded path
+            )
             
-            if clean_texts:
-                # Join the clean texts
-                full_content = ' '.join(clean_texts)
-                if len(full_content) > 100:  # Only keep substantial content
-                    structured_content['business_description'] = full_content
-                    break
-        
-        # Also try to find specific sections by looking for Swedish keywords in text
-        for swedish_key, english_key in swedish_sections.items():
-            # Look for text that contains these Swedish keywords
-            text_elements = response.css('p::text, li::text, h2::text, h3::text, h4::text').getall()
-            
-            for text in text_elements:
-                if swedish_key in text:
-                    # Get the parent element to extract more context
-                    parent = response.xpath(f'//*[contains(text(), "{swedish_key}")]').get()
-                    if parent:
-                        # Extract text from this section, but limit to reasonable length
-                        section_text = ' '.join([t.strip() for t in text_elements if t.strip() and len(t.strip()) > 20])
-                        
-                        # Clean up the content
-                        if swedish_key in section_text:
-                            section_text = section_text.replace(swedish_key, '').strip()
-                        
-                        if section_text and len(section_text) > 50 and len(section_text) < 2000:  # Reasonable length
-                            structured_content[english_key] = section_text
+            if result.returncode == 0:
+                # Check if the scraper created a new file
+                for file_path in data_files:
+                    if os.path.exists(file_path):
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            raw_data = json.load(f)
                             break
+            else:
+                print(f"Scraper failed: {result.stderr}")
+                return None
         
-        # If we found structured content, store it
-        if structured_content:
-            item['structured_content'] = structured_content
+        if not raw_data:
+            return None
+        
+        # Transform the data to match the expected format with translation and USD conversion
+        transformed_data = []
+        for item in raw_data:
+            # Create details sections from the scraped data
+            details_sections = []
             
-            # Also create a comprehensive full description
-            full_description_parts = []
-            for key, content in structured_content.items():
-                if key in ['company_brief', 'description', 'business_activity', 'business_description']:
-                    full_description_parts.append(content)
+            # Add business description section (use full description if available)
+            description_text = item.get('full_description') or item.get('description', '')
+            if description_text:
+                details_sections.append({
+                    "infoSummary": "Business Description",
+                    "infoItems": [translate_text(description_text)]
+                })
             
-            if full_description_parts:
-                item['full_description'] = ' '.join(full_description_parts)
+            # Add structured content sections if available
+            if item.get('structured_content'):
+                structured_content = item.get('structured_content', {})
+                for section_key, section_content in structured_content.items():
+                    if section_content and len(str(section_content).strip()) > 20:
+                        # Translate section names
+                        section_names = {
+                            'company_brief': 'Company Overview',
+                            'potential': 'Growth Potential',
+                            'reason_for_sale': 'Reason for Sale',
+                            'price_idea': 'Pricing Details',
+                            'summary': 'Summary',
+                            'description': 'Description',
+                            'business_activity': 'Business Activity',
+                            'market': 'Market Information',
+                            'competition': 'Competitive Situation'
+                        }
+                        
+                        section_title = section_names.get(section_key, section_key.replace('_', ' ').title())
+                        details_sections.append({
+                            "infoSummary": section_title,
+                            "infoItems": [translate_text(str(section_content))]
+                        })
+            
+            # Add financial metrics section
+            financial_items = []
+            if item.get('revenue'):
+                financial_items.append(f"Revenue: {translate_text(item.get('revenue', ''))}")
+            if item.get('detailed_revenue'):
+                financial_items.append(f"Detailed Revenue: {translate_text(item.get('detailed_revenue', ''))}")
+            if item.get('profit_status'):
+                financial_items.append(f"Profit Status: {translate_text(item.get('profit_status', ''))}")
+            if item.get('detailed_profit'):
+                financial_items.append(f"Detailed Profit: {translate_text(item.get('detailed_profit', ''))}")
+            if item.get('price'):
+                financial_items.append(f"Asking Price: {convert_currency(item.get('price', ''))}")
+            
+            # Add additional financial details
+            if item.get('financial_details'):
+                for detail in item.get('financial_details', []):
+                    financial_items.append(translate_text(detail))
+            
+            if financial_items:
+                details_sections.append({
+                    "infoSummary": "Financial Information",
+                    "infoItems": financial_items
+                })
+            
+            # Add business metrics section
+            business_items = []
+            if item.get('employee_count'):
+                business_items.append(f"Employees: {translate_text(item.get('employee_count', ''))}")
+            
+            if business_items:
+                details_sections.append({
+                    "infoSummary": "Business Metrics",
+                    "infoItems": business_items
+                })
+            
+            # Add contact information section
+            contact_items = []
+            if item.get('phone'):
+                contact_items.append(f"Phone: {item.get('phone', '')}")
+            if item.get('email'):
+                contact_items.append(f"Email: {item.get('email', '')}")
+            if item.get('broker_name'):
+                contact_items.append(f"Broker: {translate_text(item.get('broker_name', ''))}")
+            if item.get('broker_company'):
+                contact_items.append(f"Broker Company: {translate_text(item.get('broker_company', ''))}")
+            
+            if contact_items:
+                details_sections.append({
+                    "infoSummary": "Contact Information",
+                    "infoItems": contact_items
+                })
+            
+            # Create the transformed item
+            transformed_item = {
+                "title": item.get("title", ""),
+                "company": item.get("title", ""),  # Use title as company name
+                "location": item.get("location", ""),
+                "price": convert_currency(item.get("price", "")),
+                "category": item.get("category", ""),
+                "industry": item.get("category", ""),  # Use category as industry
+                "link": item.get("url", ""),
+                "details": details_sections,
+                "business_name": item.get("title", ""),
+                "contact_name": item.get("broker_name", ""),
+                "phone_number": item.get("phone", "")
+            }
+            
+            transformed_data.append(transformed_item)
+        
+        return transformed_data
+        
+    except Exception as e:
+        print(f"Error in run_scraper: {e}")
+        return None
+
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "Bolagsplatsen Scraper API",
+        "version": "1.0.0",
+        "endpoints": {
+            "/scrap": "Get all scraped listings (for n8n workflow)",
+            "/listings": "Get all scraped listings",
+            "/listings/{product_id}": "Get specific listing by product ID",
+            "/search": "Search listings by query parameters"
+        }
+    }
+
+@app.get("/scrap")
+async def scrap():
+    """Main endpoint for n8n workflow - returns data in expected format"""
+    data = run_scraper()
     
-    def _extract_detailed_financials(self, response, item):
-        """Extract detailed financial information from the detail page"""
-        # Look for detailed financial sections
-        financial_sections = response.css('.financial-info, .business-details, .company-info')
-        
-        financial_details = []
-        
-        for section in financial_sections:
-            # Extract revenue details
-            revenue_details = section.css('*:contains("Omsättning")').getall()
-            if revenue_details:
-                for detail in revenue_details:
-                    if 'Omsättning' in detail and len(detail) > 50:  # More detailed than card
-                        item['detailed_revenue'] = detail.strip()
-                        break
-            
-            # Extract profit details
-            profit_details = section.css('*:contains("Resultat")').getall()
-            if profit_details:
-                for detail in profit_details:
-                    if 'Resultat' in detail and len(detail) > 50:  # More detailed than card
-                        item['detailed_profit'] = detail.strip()
-                        break
-            
-            # Extract other financial metrics
-            financial_text = section.css('::text').getall()
-            for text in financial_text:
-                text = text.strip()
-                if any(keyword in text.lower() for keyword in ['omsättning', 'resultat', 'vinst', 'förlust', 'kostnad', 'intäkt']):
-                    if len(text) > 20:  # Avoid very short matches
-                        financial_details.append(text)
-        
-        # Also look in the main content for financial information
-        main_content = response.css('.main-content, .content, .listing-content')
-        for content in main_content:
-            financial_paragraphs = content.css('p:contains("Omsättning"), p:contains("Resultat"), p:contains("Vinst"), p:contains("Förlust")')
-            for para in financial_paragraphs:
-                para_text = para.css('::text').get()
-                if para_text and len(para_text.strip()) > 30:
-                    financial_details.append(para_text.strip())
-        
-        if financial_details:
-            item['financial_details'] = financial_details
+    if not data:
+        raise HTTPException(status_code=404, detail="No data available or scraping failed.")
     
-    def _extract_employee_info(self, response, item):
-        """Extract employee count information from detail page"""
-        # Look for employee count in various sections
-        employee_selectors = [
-            '*:contains("Anställda")',
-            '*:contains("Personal")',
-            '*:contains("Medarbetare")',
-            '*:contains("anställd")'
+    return data
+
+@app.get("/listings", response_model=List[BusinessListing])
+async def get_listings(
+    limit: Optional[int] = None,
+    offset: Optional[int] = 0,
+    category: Optional[str] = None,
+    location: Optional[str] = None
+):
+    """Get all scraped listings with optional filtering and pagination"""
+    # Run scraper and get data
+    data = run_scraper()
+    
+    if not data:
+        raise HTTPException(status_code=404, detail="No data available or scraping failed.")
+    
+    # Apply filters
+    if category:
+        data = [item for item in data if item.get("category") == category]
+    
+    if location:
+        data = [item for item in data if item.get("location") == location]
+    
+    # Apply pagination
+    if offset:
+        data = data[offset:]
+    
+    if limit:
+        data = data[:limit]
+    
+    return data
+
+@app.get("/listings/{product_id}", response_model=BusinessListing)
+async def get_listing(product_id: str):
+    """Get a specific listing by product ID"""
+    data = run_scraper()
+    
+    if not data:
+        raise HTTPException(status_code=404, detail="No data available or scraping failed.")
+    
+    for item in data:
+        if item.get("product_id") == product_id:
+            return item
+    
+    raise HTTPException(status_code=404, detail=f"Listing with product ID {product_id} not found")
+
+@app.get("/search")
+async def search_listings(
+    q: str,
+    limit: Optional[int] = 50
+):
+    """Search listings by text query"""
+    data = run_scraper()
+    
+    if not data:
+        raise HTTPException(status_code=404, detail="No data available or scraping failed.")
+    
+    query = q.lower()
+    results = []
+    
+    for item in data:
+        # Search in title, description, category, and location
+        searchable_fields = [
+            item.get("title", ""),
+            item.get("company", ""),
+            item.get("category", ""),
+            item.get("location", "")
         ]
         
-        for selector in employee_selectors:
-            employee_elements = response.css(selector)
-            for element in employee_elements:
-                text = element.css('::text').get()
-                if text and 'anställd' in text.lower():
-                    # Extract number from text like "Anställda: 11 st." or "11 anställda"
-                    numbers = re.findall(r'\d+', text)
-                    if numbers:
-                        item['employee_count'] = f"{numbers[0]} employees"
-                        return
+        if any(query in field.lower() for field in searchable_fields):
+            results.append(item)
+            
+        if len(results) >= limit:
+            break
+    
+    return {
+        "query": q,
+        "results": results,
+        "total_found": len(results)
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
